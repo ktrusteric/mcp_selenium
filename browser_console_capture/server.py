@@ -1,296 +1,247 @@
 #!/usr/bin/env python3
-"""
-Browser Console Capture MCP Server
-
-优化版本 - 基于Chrome DevTools Console API标准
-增强的日志捕获、JavaScript执行和页面元素交互功能
+"""浏览器Console报错捕捉MCP服务
+提供浏览器自动化和错误捕捉功能，让AI模型能够自动操作浏览器并获取错误信息
+支持test-token-eric特殊认证，默认以eric用户身份访问并自带授权
 """
 
-import asyncio
-import json
+import base64
+import time
 import logging
 import os
-import time
+import json
+import requests
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-
-from mcp.server.fastmcp import FastMCP
+from typing import Dict, Any
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from mcp.server.fastmcp import FastMCP
+from auth_utils import (
+    browser_mcp_auth_required, 
+    get_browser_mcp_auth_headers, 
+    log_browser_mcp_auth_info,
+    authenticate_user,
+    TEST_TOKEN_ERIC
+)
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
+# Load configuration
+config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+with open(config_path, 'r', encoding='utf-8') as f:
+    config = json.load(f)
+
+# Configure logging based on config
+logging.basicConfig(
+    level=getattr(logging, config['logging']['level']),
+    format=config['logging']['format'],
+    handlers=[
+        logging.FileHandler(config['logging']['file']),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
+logger.info("日志系统初始化完成，配置已加载")
 
-# 全局状态管理
-state = {
-    "drivers": {},  # session_id -> driver
-    "current_session": None,
-    "auth_users": {"eric": "welcome1"}  # 简单的用户认证
-}
+# 记录认证配置信息
+log_browser_mcp_auth_info()
 
-# MCP服务器实例
+logger.info("初始化FastMCP服务器...")
 mcp = FastMCP(
     name="browser-console-capture",
     instructions="This is a browser console capture MCP service with test-token-eric authentication support.",
 )
+logger.info("FastMCP服务器初始化完成")
 
-def browser_mcp_auth_required(func):
-    """装饰器：要求浏览器MCP认证"""
-    def wrapper(*args, **kwargs):
-        # 简单的认证检查
-        current_user = kwargs.get('current_user', {})
-        if not current_user.get('authenticated', False):
-            return {
-                "success": False,
-                "error": "Authentication required",
-                "message": "请先使用authenticate_user工具进行认证"
-            }
-        return func(*args, **kwargs)
-    return wrapper
+# Global state to store browser instances
+state = {
+    "drivers": {},
+    "current_session": None
+}
+logger.info("状态字典初始化完成")
 
-def get_driver(session_id: str = None) -> webdriver.Chrome:
-    """获取或创建WebDriver实例"""
-    if session_id is None:
-        session_id = state["current_session"]
-    
-    if session_id and session_id in state["drivers"]:
-        return state["drivers"][session_id]
-    
-    # 创建新的driver
-    chrome_options = ChromeOptions()
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--window-size=1920,1080")
-    
-    # 启用日志记录
-    chrome_options.add_argument("--enable-logging")
-    chrome_options.add_argument("--log-level=0")
-    chrome_options.set_capability('goog:loggingPrefs', {
-        'browser': 'ALL',
-        'driver': 'ALL',
-        'performance': 'ALL'
-    })
-    
-    service = ChromeService(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    
-    # 存储driver
-    if session_id is None:
-        session_id = f"session_{int(time.time())}"
-    
-    state["drivers"][session_id] = driver
-    state["current_session"] = session_id
-    
-    logger.info(f"创建新的浏览器会话: {session_id}")
-    return driver
 
-def parse_console_message(message: str) -> dict:
-    """
-    Parse console message to extract useful information
-    Based on Chrome DevTools Console API format
-    """
-    try:
-        # 常见的console消息格式解析
-        if message.startswith('"'):
-            # 简单字符串消息
-            return {
-                "type": "string",
-                "clean_message": message.strip('"'),
-                "source": "console.log"
-            }
-        elif "console-api" in message:
-            # Console API调用
-            parts = message.split('"')
-            if len(parts) >= 2:
-                return {
-                    "type": "console_api",
-                    "clean_message": parts[1],
-                    "source": "console API"
-                }
-        elif "Uncaught" in message:
-            # JavaScript错误
-            return {
-                "type": "javascript_error",
-                "clean_message": message,
-                "source": "JavaScript Runtime"
-            }
-        elif "Failed to load resource" in message:
-            # 资源加载错误
-            return {
-                "type": "resource_error",
-                "clean_message": message,
-                "source": "Network"
-            }
-        else:
-            # 其他类型消息
-            return {
-                "type": "other",
-                "clean_message": message,
-                "source": "browser"
-            }
-    except Exception:
-        return {
-            "type": "unknown",
-            "clean_message": message,
-            "source": "unknown"
-        }
+def get_driver():
+    """Get the current active driver"""
+    logger.debug(f"获取驱动器，当前会话: {state['current_session']}")
+    logger.debug(f"可用驱动器: {list(state['drivers'].keys())}")
+    
+    if not state["drivers"]:
+        logger.error("没有活动的浏览器会话")
+        raise Exception("No browser session active. Please start a browser first.")
+    
+    # Return the current session driver or the first available driver
+    if state["current_session"] and state["current_session"] in state["drivers"]:
+        driver = state["drivers"][state["current_session"]]
+        logger.debug(f"成功获取当前会话驱动器: {type(driver)}")
+        return driver
+    
+    # Return the first available driver
+    for session_id, driver in state["drivers"].items():
+        if driver:
+            state["current_session"] = session_id
+            logger.debug(f"成功获取第一个可用驱动器: {type(driver)}")
+            return driver
+    
+    logger.error("没有找到活动的浏览器会话")
+    raise Exception("No active browser session found.")
 
-def get_console_logs_internal(level: str = "ALL", limit: int = 1000, format_output: bool = True):
-    """
-    Internal function to get console logs (used by other functions)
-    """
-    try:
-        driver = get_driver()
-        
-        # Get browser logs with enhanced error handling
-        all_logs = []
-        log_types = ['browser']  # 主要关注browser日志，其他类型通常噪音较多
-        
-        for log_type in log_types:
-            try:
-                logs = driver.get_log(log_type)
-                for log in logs:
-                    log['log_type'] = log_type
-                    all_logs.append(log)
-            except Exception as type_error:
-                logger.debug(f"无法获取{log_type}日志: {type_error}")
-        
-        # 按时间戳排序
-        all_logs.sort(key=lambda x: x.get('timestamp', 0))
-        
-        # Enhanced log formatting with better message parsing
-        formatted_logs = []
-        for log in all_logs:
-            # 解析日志消息，提取更有用的信息
-            message = log['message']
-            parsed_info = parse_console_message(message)
-            
-            formatted_log = {
-                "level": log['level'],
-                "message": message,
-                "parsed_message": parsed_info['clean_message'],
-                "message_type": parsed_info['type'],
-                "source_info": parsed_info['source'],
-                "timestamp": log['timestamp'],
-                "log_type": log.get('log_type', 'browser'),
-                "datetime": datetime.fromtimestamp(log['timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-                "relative_time": f"+{round((log['timestamp'] - all_logs[0]['timestamp']) / 1000, 3)}s" if all_logs else "0s"
-            }
-            formatted_logs.append(formatted_log)
-        
-        # Filter by level
-        if level != "ALL":
-            formatted_logs = [log for log in formatted_logs if log['level'].upper() == level.upper()]
-        
-        # Apply limit to most recent logs
-        if limit and len(formatted_logs) > limit:
-            formatted_logs = formatted_logs[-limit:]
-        
-        # 统计各级别日志数量
-        level_counts = {}
-        for log in formatted_logs:
-            log_level = log['level']
-            level_counts[log_level] = level_counts.get(log_level, 0) + 1
-        
-        return {
-            "success": True,
-            "total_count": len(all_logs),
-            "filtered_count": len(formatted_logs),
-            "level_filter": level,
-            "level_counts": level_counts,
-            "logs": formatted_logs
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "logs": []
-        }
+
+def generate_session_id(browser: str) -> str:
+    """生成会话ID"""
+    import time
+    timestamp = int(time.time())
+    return f"{browser}_{timestamp}"
+
 
 @mcp.tool()
-def authenticate_user(username: str, password: str) -> dict:
+def authenticate_user(username: str, password: str):
     """
     Authenticate user for browser operations.
     :param username: Username
     :param password: Password
     """
-    if username in state["auth_users"] and state["auth_users"][username] == password:
-        return {
-            "success": True,
-            "message": "Authentication successful",
-            "user_info": {
-                "username": username,
-                "authenticated": True,
-                "session_id": f"auth_{int(time.time())}"
+    try:
+        from auth_utils import authenticate_user as auth_func
+        success, message, user_data = auth_func(username, password)
+        
+        if success:
+            logger.info(f"用户认证成功: {user_data['username']} ({user_data['login_name']})")
+            return {
+                "success": True,
+                "message": message,
+                "user_data": {
+                    "user_id": user_data['user_id'],
+                    "username": user_data['username'],
+                    "login_name": user_data['login_name'],
+                    "user_role": user_data['user_role'],
+                    "phone": user_data['phone'],
+                    "is_active": user_data['is_active']
+                }
             }
-        }
-    else:
-        return {
-            "success": False,
-            "error": "Invalid credentials",
-            "message": "用户名或密码错误"
-        }
-
-@mcp.tool()
-@browser_mcp_auth_required
-def open_browser(headless: bool = False, window_size: str = "1920,1080", **kwargs) -> dict:
-    """
-    Open a new browser instance with enhanced configuration.
-    :param headless: Whether to run in headless mode
-    :param window_size: Browser window size (width,height)
-    """
-    current_user = kwargs.get('current_user', {})
-    logger.info(f"用户 {current_user.get('username', 'unknown')} 请求打开浏览器")
-    
-    try:
-        driver = get_driver()
-        
-        if headless:
-            driver.execute_script("window.resizeTo(arguments[0], arguments[1]);", 
-                                *map(int, window_size.split(',')))
-        
-        return {
-            "success": True,
-            "message": "Browser opened successfully",
-            "session_id": state["current_session"],
-            "window_size": driver.get_window_size(),
-            "user_agent": driver.execute_script("return navigator.userAgent;")
-        }
-        
+        else:
+            logger.warning(f"用户认证失败: {message}")
+            return {
+                "success": False,
+                "message": message,
+                "user_data": None
+            }
+            
     except Exception as e:
-        logger.error(f"打开浏览器失败: {str(e)}", exc_info=True)
+        error_msg = f"认证过程异常: {str(e)}"
+        logger.error(error_msg)
         return {
             "success": False,
-            "error": str(e),
-            "message": "Failed to open browser"
+            "message": error_msg,
+            "user_data": None
         }
+
 
 @mcp.tool()
 @browser_mcp_auth_required
-def navigate_to_url(url: str, wait_for_load: bool = True, timeout: int = 30, **kwargs) -> dict:
+def start_browser(browser: str = "chrome", headless: bool = True, window_size: str = "1920,1080", **kwargs):
     """
-    Navigate to a specific URL with enhanced loading detection.
-    :param url: Target URL
-    :param wait_for_load: Whether to wait for page load completion
-    :param timeout: Maximum wait time for page load
+    Start a browser (supports Chrome and Firefox)
+    :param browser: Browser type ("chrome" or "firefox")
+    :param headless: Whether to run in headless mode
+    :param window_size: Browser window size
     """
-    current_user = kwargs.get('current_user', {})
-    logger.info(f"用户 {current_user.get('username', 'unknown')} 请求导航到: {url}")
-    
     try:
-        driver = get_driver()
-        logger.debug(f"开始导航到: {url}")
+        # 获取认证用户信息
+        current_user = kwargs.get('current_user', {})
+        logger.info(f"用户 {current_user.get('username', 'unknown')} 启动浏览器: {browser}, 无头模式: {headless}, 窗口大小: {window_size}")
+        if browser not in ["chrome", "firefox"]:
+            logger.error(f"不支持的浏览器类型: {browser}")
+            raise ValueError("Unsupported browser type. Use 'chrome' or 'firefox'.")
+
+        driver = None
+        logger.debug(f"准备启动{browser}浏览器")
+        if browser == "chrome":
+            chrome_options = ChromeOptions()
+            if headless:
+                chrome_options.add_argument("--headless=new")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+            chrome_options.add_argument("--remote-debugging-port=9222")
+            chrome_options.add_argument(f"--window-size={window_size}")
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            
+            # 启用日志记录
+            chrome_options.add_argument("--enable-logging")
+            chrome_options.add_argument("--log-level=0")
+            chrome_options.set_capability('goog:loggingPrefs', {'browser': 'ALL'})
+            
+            try:
+                # 使用指定的Chrome和ChromeDriver路径
+                chrome_binary_path = "/opt/chrome-linux64/chrome"
+                chromedriver_path = "/opt/chromedriver-linux64/chromedriver"
+                
+                # 设置Chrome二进制路径
+                chrome_options.binary_location = chrome_binary_path
+                
+                # 使用指定的ChromeDriver路径
+                from selenium.webdriver.chrome.service import Service
+                service = Service(chromedriver_path)
+                
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            except Exception as chrome_error:
+                # 如果指定路径失败，尝试使用系统默认Chrome
+                try:
+                    driver = webdriver.Chrome(options=chrome_options)
+                except Exception:
+                    # 如果Chrome完全失败，尝试使用Firefox
+                    firefox_options = FirefoxOptions()
+                    if headless:
+                        firefox_options.add_argument("--headless")
+                    firefox_options.add_argument("--no-sandbox")
+                    firefox_options.add_argument("--disable-dev-shm-usage")
+                    
+                    driver = webdriver.Firefox(options=firefox_options)
+
+        elif browser == "firefox":
+            firefox_options = FirefoxOptions()
+            if headless:
+                firefox_options.add_argument("--headless")
+            firefox_options.add_argument("--no-sandbox")
+            firefox_options.add_argument("--disable-dev-shm-usage")
+            
+            driver = webdriver.Firefox(options=firefox_options)
+
+        session_id = generate_session_id(browser)
+        state["drivers"][session_id] = driver
+        state["current_session"] = session_id
         
-        start_time = time.time()
+        logger.info(f"浏览器启动成功，会话ID: {session_id}")
+        logger.debug(f"当前状态: drivers={list(state['drivers'].keys())}, current_session={state['current_session']}")
+        return f"Browser started with session_id: {session_id}"
+
+    except Exception as e:
+        logger.error(f"启动浏览器失败: {str(e)}", exc_info=True)
+        return f"Error starting browser: {str(e)}"
+
+    
+@mcp.tool()
+@browser_mcp_auth_required
+def navigate_to_url(url: str, wait_for_load: bool = True, timeout: int = 30, **kwargs):
+    """
+    Navigates the browser to a specified URL.
+    :param url: The URL to navigate to.
+    :param wait_for_load: Whether to wait for page load completion
+    :param timeout: Maximum time to wait for page load
+    """
+    try:
+        # 获取认证用户信息
+        current_user = kwargs.get('current_user', {})
+        logger.info(f"用户 {current_user.get('username', 'unknown')} 导航到URL: {url}, wait_for_load={wait_for_load}, timeout={timeout}")
+        driver = get_driver()
+        logger.debug(f"获取到驱动器，开始导航到: {url}")
         driver.get(url)
         logger.debug(f"页面加载请求已发送")
         
@@ -300,109 +251,50 @@ def navigate_to_url(url: str, wait_for_load: bool = True, timeout: int = 30, **k
             wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
             logger.debug("页面加载完成")
         
-        load_time = round((time.time() - start_time) * 1000, 2)
         title = driver.title
-        
         logger.info(f"成功导航到 {url}，页面标题: {title}")
-        return {
-            "success": True,
-            "message": f"Successfully navigated to {url}",
-            "url": driver.current_url,
-            "title": title,
-            "load_time_ms": load_time,
-            "ready_state": driver.execute_script("return document.readyState")
-        }
-        
+        return f"Navigated to {url}. Current title: {title}. The next setp is execute_javascript "
     except Exception as e:
         logger.error(f"导航失败: {str(e)}", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "message": "Navigation failed"
-        }
-
+        return f"Error navigating: {str(e)}"
+    
 @mcp.tool()
 @browser_mcp_auth_required
-def execute_javascript(script: str, capture_console: bool = True, timeout: int = 30, return_value: bool = True, **kwargs) -> dict:
+def execute_javascript(script: str, capture_console: bool = True, timeout: int = 10, max_logs: int = 1000, **kwargs):
     """
-    Execute JavaScript code in the current page with enhanced console capture.
+    Execute JavaScript code in the current page.
     :param script: JavaScript code to execute
-    :param capture_console: Whether to capture and return console logs immediately
-    :param timeout: Execution timeout in seconds
-    :param return_value: Whether to return the script execution result
+    :param capture_console: Whether to show console logs note (use get_console_logs separately to avoid buffer clearing)
+    :param timeout: Execution timeout
+    :param max_logs: Deprecated parameter (kept for compatibility)
     
-    Enhanced features:
-    - Automatic console log capture with proper formatting
-    - Support for async JavaScript execution
-    - Better error handling and reporting
-    - Performance timing information
+    Note: To properly capture console logs, execute JavaScript with capture_console=False,
+    then call get_console_logs separately to avoid log buffer being cleared.
     """
     # 获取认证用户信息
     current_user = kwargs.get('current_user', {})
     logger.info(f"用户 {current_user.get('username', 'unknown')} 执行JavaScript: {script[:200]}{'...' if len(script) > 200 else ''}, capture_console={capture_console}")
-    
     try:
         driver = get_driver()
         logger.debug("获取到驱动器，开始执行JavaScript")
         
-        # 记录执行开始时间
-        start_time = time.time()
-        
-        # 如果需要捕获console，先清空之前的日志
-        if capture_console:
-            try:
-                # 清空现有日志缓冲区
-                driver.get_log('browser')
-            except:
-                pass
-        
-        # Execute JavaScript with timeout handling
-        try:
-            if return_value:
-                result = driver.execute_script(script)
-            else:
-                driver.execute_script(script)
-                result = None
-        except Exception as js_error:
-            logger.error(f"JavaScript执行错误: {str(js_error)}")
-            return {
-                "success": False,
-                "error": str(js_error),
-                "error_type": "execution_error",
-                "script_executed": script[:200] + ('...' if len(script) > 200 else ''),
-                "execution_time_ms": round((time.time() - start_time) * 1000, 2)
-            }
-        
-        execution_time = round((time.time() - start_time) * 1000, 2)
-        logger.debug(f"JavaScript执行完成，耗时: {execution_time}ms")
+        # Execute JavaScript
+        result = driver.execute_script(script)
+        logger.debug(f"JavaScript执行完成，结果: {str(result)[:500]}{'...' if len(str(result)) > 500 else ''}")
         
         response_data = {
             "success": True,
             "result": result,
             "script_executed": script[:200] + ('...' if len(script) > 200 else ''),
-            "execution_time_ms": execution_time,
             "console_logs": []
         }
         
-        # 如果需要捕获console日志
         if capture_console:
-            try:
-                # 获取执行后的console日志
-                console_result = get_console_logs_internal(level="ALL", limit=100, format_output=True)
-                if console_result["success"]:
-                    response_data["console_logs"] = console_result["logs"]
-                    response_data["console_summary"] = {
-                        "total_count": len(console_result["logs"]),
-                        "level_counts": console_result["level_counts"],
-                        "has_errors": any(log["level"] in ["ERROR", "SEVERE"] for log in console_result["logs"])
-                    }
-                else:
-                    response_data["console_logs_error"] = console_result["error"]
-            except Exception as console_error:
-                logger.warning(f"获取console日志失败: {console_error}")
-                response_data["console_logs_error"] = str(console_error)
+            logger.debug("JavaScript执行完成，建议使用get_console_logs获取日志")
+            response_data["console_logs_note"] = "JavaScript执行完成，请使用get_console_logs工具获取控制台日志以避免日志缓冲区被清空"
+            response_data["console_count"] = "请使用get_console_logs查看"
         
-        logger.info(f"JavaScript执行成功，耗时: {execution_time}ms")
+        logger.info("JavaScript执行成功")
         return response_data
         
     except Exception as e:
@@ -410,12 +302,12 @@ def execute_javascript(script: str, capture_console: bool = True, timeout: int =
         return {
             "success": False,
             "error": str(e),
-            "error_type": "system_error",
             "script_executed": script[:200] + ('...' if len(script) > 200 else '')
         }
 
+    
 @mcp.tool()
-def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: int = 1000, include_performance: bool = True) -> dict:
+def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: int = 1000, include_performance: bool = True, exclude_info: bool = False):
     """
     Get console logs from the browser with enhanced formatting and analysis.
     Based on Chrome DevTools Console API standards.
@@ -424,91 +316,209 @@ def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: i
     :param clear_after_get: Whether to clear logs after getting them
     :param limit: Maximum number of logs to return (default: 1000)
     :param include_performance: Whether to include performance timing information
+    :param exclude_info: Whether to exclude INFO level logs from the response (useful for AI model processing)
     
     Enhanced features:
     - Better message parsing and formatting
     - Performance timing analysis
     - Error categorization
     - Source information extraction
+    - Optional INFO level filtering for AI model optimization
     """
     try:
         driver = get_driver()
         logger.debug(f"开始获取控制台日志，级别: {level}, 限制: {limit}")
         
-        # 获取性能信息（如果需要）
+        # Chrome DevTools Console API 日志级别映射
+        # 参考: https://developer.chrome.com/docs/devtools/console/api
+        console_level_mapping = {
+            'SEVERE': 'ERROR',     # console.error(), console.assert(false)
+            'WARNING': 'WARNING',  # console.warn()
+            'INFO': 'INFO',        # console.log(), console.info(), console.dir(), console.table()
+            'DEBUG': 'VERBOSE',    # console.debug()
+            'FINE': 'VERBOSE',     # 详细调试信息
+            'FINER': 'VERBOSE',    # 更详细的调试信息
+            'FINEST': 'VERBOSE'    # 最详细的调试信息
+        }
+        
+        # Get browser logs - 获取所有类型的日志
+        all_logs = []
+        log_types = ['browser', 'driver', 'client', 'server']
+        
+        for log_type in log_types:
+            try:
+                logs = driver.get_log(log_type)
+                for log in logs:
+                    log['log_type'] = log_type
+                    all_logs.append(log)
+                logger.debug(f"从{log_type}获取到{len(logs)}条日志")
+            except Exception as type_error:
+                logger.debug(f"无法获取{log_type}日志: {type_error}")
+        
+        # 按时间戳排序
+        all_logs.sort(key=lambda x: x.get('timestamp', 0))
+        
+        # Enhanced log formatting with Chrome DevTools standards
+        formatted_logs = []
+        error_count = 0
+        warning_count = 0
+        
+        for log in all_logs:
+            # 解析消息内容，提取堆栈跟踪信息
+            message = log.get('message', '')
+            
+            # 检测是否包含堆栈跟踪
+            has_stack_trace = 'at ' in message or 'Error:' in message or 'TypeError:' in message
+            
+            # 提取源文件信息
+            source_info = log.get('source', 'unknown')
+            if 'console-api' in source_info:
+                source_type = 'console-api'  # console.log/error/warn等
+            elif 'javascript' in source_info:
+                source_type = 'javascript'   # JavaScript运行时错误
+            elif 'network' in source_info:
+                source_type = 'network'      # 网络请求错误
+            else:
+                source_type = 'other'
+            
+            # 标准化日志级别
+            original_level = log.get('level', 'INFO')
+            normalized_level = console_level_mapping.get(original_level, original_level)
+            
+            # 解析错误类型
+            error_type = None
+            if normalized_level in ['ERROR', 'SEVERE']:
+                error_count += 1
+                if 'TypeError:' in message:
+                    error_type = 'TypeError'
+                elif 'ReferenceError:' in message:
+                    error_type = 'ReferenceError'
+                elif 'SyntaxError:' in message:
+                    error_type = 'SyntaxError'
+                elif 'NetworkError:' in message or '404' in message:
+                    error_type = 'NetworkError'
+                elif 'console.assert' in message:
+                    error_type = 'AssertionError'
+                else:
+                    error_type = 'UnknownError'
+            elif normalized_level == 'WARNING':
+                warning_count += 1
+            
+            # 提取文件和行号信息
+            file_info = None
+            line_number = None
+            if ' at ' in message:
+                # 尝试提取堆栈跟踪中的文件信息
+                import re
+                file_match = re.search(r'at\s+.*?\((.*?):(\d+):(\d+)\)', message)
+                if file_match:
+                    file_info = file_match.group(1)
+                    line_number = int(file_match.group(2))
+            
+            formatted_log = {
+                "level": normalized_level,
+                "original_level": original_level,
+                "message": message,
+                "timestamp": log['timestamp'],
+                "datetime": datetime.fromtimestamp(log['timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+                "source": source_info,
+                "source_type": source_type,
+                "log_type": log.get('log_type', 'browser'),
+                "has_stack_trace": has_stack_trace,
+                "error_type": error_type,
+                "file_info": file_info,
+                "line_number": line_number,
+                "console_method": _detect_console_method(message)  # 检测使用的console方法
+            }
+            formatted_logs.append(formatted_log)
+        
+        # Filter by level
+        if level != "ALL":
+            if level.upper() == "VERBOSE":
+                # VERBOSE包含所有级别
+                pass
+            else:
+                formatted_logs = [log for log in formatted_logs if log['level'].upper() == level.upper()]
+        
+        # Optional: Exclude INFO level logs for AI model processing
+        if exclude_info:
+            formatted_logs = [log for log in formatted_logs if log['level'].upper() != 'INFO']
+            logger.debug(f"已过滤INFO级别日志，剩余{len(formatted_logs)}条日志")
+        
+        # Apply limit to most recent logs
+        if limit and len(formatted_logs) > limit:
+            formatted_logs = formatted_logs[-limit:]
+        
+        # 统计各级别日志数量
+        level_counts = {}
+        console_method_counts = {}
+        for log in formatted_logs:
+            log_level = log['level']
+            level_counts[log_level] = level_counts.get(log_level, 0) + 1
+            
+            console_method = log.get('console_method', 'unknown')
+            console_method_counts[console_method] = console_method_counts.get(console_method, 0) + 1
+        
+        # Performance analysis
         performance_info = {}
         if include_performance:
             try:
-                performance_info = driver.execute_script("""
+                # 获取页面性能信息
+                performance_timing = driver.execute_script("""
                     return {
-                        navigation: performance.getEntriesByType('navigation')[0] || {},
-                        memory: performance.memory || {},
-                        timing: performance.timing || {}
+                        loadEventEnd: performance.timing.loadEventEnd,
+                        navigationStart: performance.timing.navigationStart,
+                        domContentLoadedEventEnd: performance.timing.domContentLoadedEventEnd,
+                        firstPaint: performance.getEntriesByType('paint').find(entry => entry.name === 'first-paint')?.startTime,
+                        firstContentfulPaint: performance.getEntriesByType('paint').find(entry => entry.name === 'first-contentful-paint')?.startTime
                     };
                 """)
+                
+                if performance_timing['loadEventEnd'] > 0:
+                    load_time = performance_timing['loadEventEnd'] - performance_timing['navigationStart']
+                    dom_ready_time = performance_timing['domContentLoadedEventEnd'] - performance_timing['navigationStart']
+                    
+                    performance_info = {
+                        "page_load_time_ms": load_time,
+                        "dom_ready_time_ms": dom_ready_time,
+                        "first_paint_ms": performance_timing.get('firstPaint'),
+                        "first_contentful_paint_ms": performance_timing.get('firstContentfulPaint')
+                    }
             except Exception as perf_error:
                 logger.debug(f"无法获取性能信息: {perf_error}")
-        
-        # 获取日志
-        result = get_console_logs_internal(level, limit, True)
-        
-        if not result["success"]:
-            return result
-        
-        # 增强的响应数据
-        enhanced_response = {
-            "success": True,
-            "total_count": result["total_count"],
-            "filtered_count": result["filtered_count"],
-            "level_filter": level,
-            "level_counts": result["level_counts"],
-            "logs": result["logs"],
-            "summary": {
-                "has_errors": any(log["level"] in ["ERROR", "SEVERE"] for log in result["logs"]),
-                "has_warnings": any(log["level"] == "WARNING" for log in result["logs"]),
-                "message_types": {},
-                "time_range": None
-            },
-            "capture_settings": {
-                "limit": limit,
-                "cleared_after_get": clear_after_get,
-                "include_performance": include_performance
-            }
-        }
-        
-        # 分析消息类型
-        message_types = {}
-        if result["logs"]:
-            for log in result["logs"]:
-                msg_type = log.get("message_type", "unknown")
-                message_types[msg_type] = message_types.get(msg_type, 0) + 1
-            
-            # 计算时间范围
-            if len(result["logs"]) > 1:
-                first_time = result["logs"][0]["timestamp"]
-                last_time = result["logs"][-1]["timestamp"]
-                enhanced_response["summary"]["time_range"] = {
-                    "duration_ms": last_time - first_time,
-                    "start": result["logs"][0]["datetime"],
-                    "end": result["logs"][-1]["datetime"]
-                }
-        
-        enhanced_response["summary"]["message_types"] = message_types
-        
-        # 添加性能信息
-        if include_performance and performance_info:
-            enhanced_response["performance"] = performance_info
+                performance_info = {"error": "无法获取性能信息"}
         
         # Optional: Clear logs after retrieval
         if clear_after_get:
-            try:
-                driver.execute_script("console.clear();");
-                logger.debug("已清除浏览器控制台日志")
-            except Exception as clear_error:
-                logger.warning(f"清除日志失败: {clear_error}")
+            driver.execute_script("console.clear();")
+            logger.debug("已清除浏览器控制台日志")
         
-        logger.info(f"成功获取{enhanced_response['filtered_count']}条控制台日志")
-        return enhanced_response
+        logger.info(f"成功获取{len(formatted_logs)}条控制台日志")
+        
+        # Return comprehensive structured response
+        return {
+            "success": True,
+            "total_count": len(all_logs),
+            "filtered_count": len(formatted_logs),
+            "level_filter": level,
+            "level_counts": level_counts,
+            "console_method_counts": console_method_counts,
+            "error_summary": {
+                "total_errors": error_count,
+                "total_warnings": warning_count,
+                "has_critical_errors": error_count > 0
+            },
+            "performance_info": performance_info,
+            "logs": formatted_logs,
+            "message": f"成功获取{len(formatted_logs)}条控制台日志 (总共{len(all_logs)}条，错误{error_count}条，警告{warning_count}条)",
+            "capture_settings": {
+                "limit": limit,
+                "include_performance": include_performance,
+                "cleared_after_get": clear_after_get,
+                "exclude_info": exclude_info
+            },
+            "chrome_devtools_compliance": True  # 标识符合Chrome DevTools标准
+        }
         
     except Exception as e:
         logger.error(f"获取控制台日志失败: {str(e)}", exc_info=True)
@@ -518,462 +528,224 @@ def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: i
             "message": "获取控制台日志时发生异常",
             "logs": []
         }
-
+    
+def _detect_console_method(message):
+        """
+        检测使用的console方法类型
+        基于Chrome DevTools Console API规范
+        """
+        if 'console.error' in message or 'Error:' in message:
+            return 'console.error'
+        elif 'console.warn' in message or 'Warning:' in message:
+            return 'console.warn'
+        elif 'console.info' in message:
+            return 'console.info'
+        elif 'console.debug' in message:
+            return 'console.debug'
+        elif 'console.table' in message:
+            return 'console.table'
+        elif 'console.trace' in message:
+            return 'console.trace'
+        elif 'console.assert' in message:
+            return 'console.assert'
+        elif 'console.log' in message:
+            return 'console.log'
+        else:
+            return 'unknown'
+    
 @mcp.tool()
-def click_element(selector: str, by: str = "css", timeout: int = 10, wait_after_click: float = 1, capture_before_after: bool = False) -> dict:
+def click_element(selector: str, by: str = "css", timeout: int = 10, wait_after_click: float = 1):
     """
-    Click an element on the current page with enhanced feedback.
+    Click an element on the current page.
     :param selector: Element selector
-    :param by: Selection method (css, xpath, id, name, tag, class)
+    :param by: Selection method (css, xpath)
     :param timeout: Maximum time to wait for element
     :param wait_after_click: Time to wait after clicking
-    :param capture_before_after: Whether to capture element state before and after click
     """
     try:
         driver = get_driver()
         wait = WebDriverWait(driver, timeout)
         
-        # 支持更多选择器类型
-        by_methods = {
-            "css": By.CSS_SELECTOR,
-            "xpath": By.XPATH,
-            "id": By.ID,
-            "name": By.NAME,
-            "tag": By.TAG_NAME,
-            "class": By.CLASS_NAME
-        }
+        if by.lower() == "css":
+            by_method = By.CSS_SELECTOR
+        elif by.lower() == "xpath":
+            by_method = By.XPATH
+        else:
+            return f"Unsupported selection method: {by}"
         
-        by_method = by_methods.get(by.lower())
-        if not by_method:
-            return {
-                "success": False,
-                "error": f"Unsupported selection method: {by}. Supported: {list(by_methods.keys())}"
-            }
-        
-        # 等待元素可点击
         element = wait.until(EC.element_to_be_clickable((by_method, selector)))
-        
-        # 获取点击前的元素信息
-        before_info = {}
-        if capture_before_after:
-            before_info = {
-                "text": element.text,
-                "tag_name": element.tag_name,
-                "is_displayed": element.is_displayed(),
-                "is_enabled": element.is_enabled(),
-                "location": element.location,
-                "size": element.size,
-                "attributes": {
-                    "class": element.get_attribute("class"),
-                    "id": element.get_attribute("id"),
-                    "type": element.get_attribute("type")
-                }
-            }
-        
-        # 执行点击
-        start_time = time.time()
         element.click()
-        click_time = round((time.time() - start_time) * 1000, 2)
         
-        # 等待指定时间
         if wait_after_click > 0:
             time.sleep(wait_after_click)
         
-        # 获取点击后的信息
-        after_info = {}
-        if capture_before_after:
-            try:
-                # 重新获取元素（可能已经改变）
-                element_after = driver.find_element(by_method, selector)
-                after_info = {
-                    "text": element_after.text,
-                    "is_displayed": element_after.is_displayed(),
-                    "is_enabled": element_after.is_enabled(),
-                    "location": element_after.location,
-                    "attributes": {
-                        "class": element_after.get_attribute("class"),
-                        "id": element_after.get_attribute("id"),
-                        "type": element_after.get_attribute("type")
-                    }
-                }
-            except Exception as after_error:
-                after_info = {"error": f"无法获取点击后状态: {str(after_error)}"}
+        return f"Successfully clicked element: {selector}"
         
-        response = {
-            "success": True,
-            "message": f"Successfully clicked element: {selector}",
-            "element_info": {
-                "selector": selector,
-                "by_method": by,
-                "tag_name": element.tag_name,
-                "text_preview": element.text[:100] + ('...' if len(element.text) > 100 else '')
-            },
-            "click_time_ms": click_time,
-            "wait_after_click": wait_after_click
-        }
-        
-        if capture_before_after:
-            response["state_comparison"] = {
-                "before": before_info,
-                "after": after_info
-            }
-        
-        return response
-        
-    except TimeoutException:
-        return {
-            "success": False,
-            "error": f"Element not found or not clickable within {timeout} seconds: {selector}",
-            "error_type": "timeout"
-        }
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "click_error",
-            "selector": selector
-        }
-
+        return f"Error clicking element: {str(e)}"
+    
 @mcp.tool()
-def input_text(selector: str, text: str, by: str = "css", clear_first: bool = True, timeout: int = 10, simulate_typing: bool = False) -> dict:
+def input_text(selector: str, text: str, by: str = "css", clear_first: bool = True, timeout: int = 10):
     """
-    Input text into an element on the current page with enhanced features.
+    Input text into an element on the current page.
     :param selector: Element selector
     :param text: Text to input
-    :param by: Selection method (css, xpath, id, name, tag, class)
+    :param by: Selection method (css, xpath)
     :param clear_first: Whether to clear existing text first
     :param timeout: Maximum time to wait for element
-    :param simulate_typing: Whether to simulate human-like typing with delays
     """
     try:
         driver = get_driver()
         wait = WebDriverWait(driver, timeout)
         
-        # 支持更多选择器类型
-        by_methods = {
-            "css": By.CSS_SELECTOR,
-            "xpath": By.XPATH,
-            "id": By.ID,
-            "name": By.NAME,
-            "tag": By.TAG_NAME,
-            "class": By.CLASS_NAME
-        }
+        if by.lower() == "css":
+            by_method = By.CSS_SELECTOR
+        elif by.lower() == "xpath":
+            by_method = By.XPATH
+        else:
+            return f"Unsupported selection method: {by}"
         
-        by_method = by_methods.get(by.lower())
-        if not by_method:
-            return {
-                "success": False,
-                "error": f"Unsupported selection method: {by}. Supported: {list(by_methods.keys())}"
-            }
+        element = wait.until(EC.presence_of_element_located((by_method, selector)))
         
-        # 等待元素出现并可交互
-        element = wait.until(EC.element_to_be_clickable((by_method, selector)))
-        
-        # 获取输入前的状态
-        before_value = element.get_attribute("value") or ""
-        element_type = element.get_attribute("type") or element.tag_name
-        
-        # 清空现有文本
         if clear_first:
             element.clear()
         
-        # 输入文本
-        start_time = time.time()
-        if simulate_typing:
-            # 模拟人类打字
-            for char in text:
-                element.send_keys(char)
-                time.sleep(0.05 + (0.1 * (time.time() % 1)))  # 随机延迟
-        else:
-            element.send_keys(text)
+        element.send_keys(text)
         
-        input_time = round((time.time() - start_time) * 1000, 2)
+        return f"Successfully input text '{text}' into element: {selector}"
         
-        # 获取输入后的值
-        after_value = element.get_attribute("value") or ""
-        
-        # 验证输入是否成功
-        input_successful = text in after_value if not clear_first else after_value == text
-        
-        return {
-            "success": True,
-            "message": f"Successfully input text into element: {selector}",
-            "element_info": {
-                "selector": selector,
-                "by_method": by,
-                "element_type": element_type,
-                "tag_name": element.tag_name
-            },
-            "input_details": {
-                "text_length": len(text),
-                "before_value": before_value,
-                "after_value": after_value,
-                "input_successful": input_successful,
-                "cleared_first": clear_first,
-                "simulated_typing": simulate_typing
-            },
-            "input_time_ms": input_time
-        }
-        
-    except TimeoutException:
-        return {
-            "success": False,
-            "error": f"Element not found or not interactable within {timeout} seconds: {selector}",
-            "error_type": "timeout"
-        }
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "input_error",
-            "selector": selector
-        }
-
+        return f"Error inputting text: {str(e)}"
+    
 @mcp.tool()
-def take_screenshot(filename: str = None, full_page: bool = False, element_selector: str = None, include_metadata: bool = True) -> dict:
+def take_screenshot(filename: str = None, full_page: bool = False, element_selector: str = None):
     """
-    Take a screenshot of the current page with enhanced features.
+    Take a screenshot of the current page.
     :param filename: Screenshot filename (auto-generated if not provided)
     :param full_page: Whether to capture full page
     :param element_selector: CSS selector for specific element screenshot
-    :param include_metadata: Whether to include screenshot metadata
     """
     try:
         driver = get_driver()
         
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if element_selector:
-                filename = f"element_screenshot_{timestamp}.png"
-            elif full_page:
-                filename = f"fullpage_screenshot_{timestamp}.png"
-            else:
-                filename = f"screenshot_{timestamp}.png"
+            filename = f"screenshot_{timestamp}.png"
         
         # Ensure screenshot directory exists
         screenshot_dir = "./screenshots"
         os.makedirs(screenshot_dir, exist_ok=True)
         filepath = os.path.join(screenshot_dir, filename)
         
-        # 获取截图前的信息
-        before_info = {
-            "url": driver.current_url,
-            "title": driver.title,
-            "window_size": driver.get_window_size(),
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        start_time = time.time()
-        
         if element_selector:
             # Screenshot specific element
             element = driver.find_element(By.CSS_SELECTOR, element_selector)
             element.screenshot(filepath)
-            screenshot_info = {
-                "type": "element",
-                "element_info": {
-                    "selector": element_selector,
-                    "tag_name": element.tag_name,
-                    "location": element.location,
-                    "size": element.size,
-                    "text_preview": element.text[:100] + ('...' if len(element.text) > 100 else '')
-                }
-            }
         else:
             # Screenshot entire page
-            if full_page:
-                # 尝试全页面截图
-                try:
-                    # 获取页面总高度
-                    total_height = driver.execute_script("return document.body.scrollHeight")
-                    driver.set_window_size(driver.get_window_size()["width"], total_height)
-                    driver.save_screenshot(filepath)
-                    screenshot_info = {"type": "full_page", "total_height": total_height}
-                except Exception as full_page_error:
-                    # 如果全页面截图失败，使用普通截图
-                    driver.save_screenshot(filepath)
-                    screenshot_info = {"type": "viewport", "full_page_error": str(full_page_error)}
-            else:
-                driver.save_screenshot(filepath)
-                screenshot_info = {"type": "viewport"}
+            driver.save_screenshot(filepath)
         
-        screenshot_time = round((time.time() - start_time) * 1000, 2)
-        
-        # 获取文件信息
-        file_size = os.path.getsize(filepath)
-        
-        response = {
-            "success": True,
-            "message": f"Screenshot saved: {filepath}",
-            "screenshot_info": {
-                "filepath": filepath,
-                "filename": filename,
-                "file_size_bytes": file_size,
-                "screenshot_time_ms": screenshot_time,
-                **screenshot_info
-            }
-        }
-        
-        if include_metadata:
-            response["metadata"] = before_info
-        
-        return response
+        return f"Screenshot saved: {filepath}"
         
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": "screenshot_error"
-        }
-
+        return f"Error taking screenshot: {str(e)}"
+    
 @mcp.tool()
-def get_page_info(include_html: bool = False, include_cookies: bool = False, include_performance: bool = True, include_console_summary: bool = True) -> dict:
+def wait_for_element(selector: str, by: str = "css", timeout: int = 10, condition: str = "presence"):
     """
-    Get comprehensive information about the current page.
+    Wait for an element to appear on the page.
+    :param selector: Element selector
+    :param by: Selection method (css, xpath)
+    :param timeout: Maximum time to wait
+    :param condition: Wait condition (presence, visible, clickable)
+    """
+    try:
+        driver = get_driver()
+        wait = WebDriverWait(driver, timeout)
+        
+        if by.lower() == "css":
+            by_method = By.CSS_SELECTOR
+        elif by.lower() == "xpath":
+            by_method = By.XPATH
+        else:
+            return f"Unsupported selection method: {by}"
+        
+        if condition == "presence":
+            element = wait.until(EC.presence_of_element_located((by_method, selector)))
+        elif condition == "visible":
+            element = wait.until(EC.visibility_of_element_located((by_method, selector)))
+        elif condition == "clickable":
+            element = wait.until(EC.element_to_be_clickable((by_method, selector)))
+        else:
+            return f"Unsupported wait condition: {condition}"
+        
+        return f"Element found: {element.tag_name}(text: '{element.text[:50]}...', visible: {element.is_displayed()})"
+        
+    except TimeoutException:
+        return f"Element wait timeout: {selector}"
+    except Exception as e:
+        return f"Error waiting for element: {str(e)}"
+    
+@mcp.tool()
+def get_page_info(include_html: bool = False, include_cookies: bool = False):
+    """
+    Get information about the current page.
     :param include_html: Whether to include page HTML
     :param include_cookies: Whether to include cookies
-    :param include_performance: Whether to include performance metrics
-    :param include_console_summary: Whether to include console log summary
     """
     try:
         driver = get_driver()
         
-        # 基础页面信息
-        page_info = {
-            "url": driver.current_url,
-            "title": driver.title,
-            "window_size": driver.get_window_size(),
-            "ready_state": driver.execute_script("return document.readyState")
-        }
+        info = f"URL: {driver.current_url}\nTitle: {driver.title}\nWindow size: {driver.get_window_size()}"
         
-        # HTML信息
         if include_html:
-            html_source = driver.page_source
-            page_info["html"] = {
-                "length": len(html_source),
-                "preview": html_source[:1000] + ('...' if len(html_source) > 1000 else '')
-            }
+            html_length = len(driver.page_source)
+            info += f"\nHTML length: {html_length} characters"
         
-        # Cookie信息
         if include_cookies:
             cookies = driver.get_cookies()
-            page_info["cookies"] = {
-                "count": len(cookies),
-                "details": cookies
-            }
+            info += f"\nCookies count: {len(cookies)}"
         
-        # 性能信息
-        if include_performance:
-            try:
-                performance_data = driver.execute_script("""
-                    var perf = performance;
-                    var nav = perf.getEntriesByType('navigation')[0] || {};
-                    return {
-                        navigation: {
-                            loadEventEnd: nav.loadEventEnd || 0,
-                            domContentLoadedEventEnd: nav.domContentLoadedEventEnd || 0,
-                            responseEnd: nav.responseEnd || 0,
-                            requestStart: nav.requestStart || 0
-                        },
-                        memory: perf.memory ? {
-                            usedJSHeapSize: perf.memory.usedJSHeapSize,
-                            totalJSHeapSize: perf.memory.totalJSHeapSize,
-                            jsHeapSizeLimit: perf.memory.jsHeapSizeLimit
-                        } : null,
-                        timing: {
-                            loadComplete: perf.timing.loadEventEnd - perf.timing.navigationStart,
-                            domReady: perf.timing.domContentLoadedEventEnd - perf.timing.navigationStart,
-                            firstByte: perf.timing.responseStart - perf.timing.navigationStart
-                        }
-                    };
-                """)
-                page_info["performance"] = performance_data
-            except Exception as perf_error:
-                page_info["performance"] = {"error": str(perf_error)}
-        
-        # Console日志摘要
-        if include_console_summary:
-            try:
-                console_result = get_console_logs_internal("ALL", 50, False)
-                if console_result["success"]:
-                    page_info["console_summary"] = {
-                        "total_logs": console_result["total_count"],
-                        "level_counts": console_result["level_counts"],
-                        "has_errors": any(log["level"] in ["ERROR", "SEVERE"] for log in console_result["logs"]),
-                        "recent_errors": [log for log in console_result["logs"] if log["level"] in ["ERROR", "SEVERE"]][-3:]
-                    }
-                else:
-                    page_info["console_summary"] = {"error": console_result["error"]}
-            except Exception as console_error:
-                page_info["console_summary"] = {"error": str(console_error)}
-        
-        # 页面元素统计
-        try:
-            element_stats = driver.execute_script("""
-                return {
-                    total_elements: document.querySelectorAll('*').length,
-                    forms: document.forms.length,
-                    images: document.images.length,
-                    links: document.links.length,
-                    scripts: document.scripts.length
-                };
-            """)
-            page_info["element_stats"] = element_stats
-        except Exception as stats_error:
-            page_info["element_stats"] = {"error": str(stats_error)}
-        
-        return {
-            "success": True,
-            "page_info": page_info,
-            "timestamp": datetime.now().isoformat()
-        }
+        return info
         
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": "获取页面信息时发生异常"
-        }
+        return f"Error getting page info: {str(e)}"
 
 @mcp.tool()
-def close_browser() -> dict:
+def close_browser():
     """
-    Close the browser instance with detailed reporting.
+    Close the browser instance.
     """
     try:
         # Close all drivers in state
-        closed_sessions = []
-        failed_sessions = []
-        
+        closed_count = 0
         for session_id, driver in list(state["drivers"].items()):
             if driver:
                 try:
                     driver.quit()
-                    closed_sessions.append(session_id)
                     logger.debug(f"已关闭会话: {session_id}")
                 except Exception as close_error:
-                    failed_sessions.append({"session_id": session_id, "error": str(close_error)})
                     logger.warning(f"关闭会话{session_id}时出错: {close_error}")
+                closed_count += 1
         
         # 清空状态
         state["drivers"].clear()
         state["current_session"] = None
         
-        return {
-            "success": True,
-            "message": f"Browser cleanup completed",
-            "closed_sessions": closed_sessions,
-            "failed_sessions": failed_sessions,
-            "total_closed": len(closed_sessions),
-            "total_failed": len(failed_sessions)
-        }
-        
+        return f"Closed {closed_count} browser session(s)"
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": "Error during browser cleanup"
-        }
+        return f"Error closing browser: {str(e)}"
 
+# Run the FastMCP server
 if __name__ == "__main__":
-    mcp.run()
+    logger.info("启动FastMCP服务器...")
+    logger.info(f"日志文件位置: /tmp/browser_mcp_server.log")
+    logger.info(f"当前工作目录: {os.getcwd()}")
+    logger.info(f"Python路径: {os.sys.executable}")
+    
+    try:
+        logger.info("开始运行MCP服务器")
+        mcp.run()
+    except Exception as e:
+        logger.error(f"MCP服务器运行失败: {str(e)}", exc_info=True)
+        raise
