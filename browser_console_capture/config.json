@@ -1,0 +1,66 @@
+{
+  "browser": {
+    "default_type": "chrome",
+    "default_headless": false,
+    "default_window_size": "1920,1080",
+    "default_timeout": 30,
+    "chrome_options": [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-web-security",
+      "--allow-running-insecure-content",
+      "--disable-features=VizDisplayCompositor"
+    ],
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  },
+  "console": {
+    "max_logs": 10000,
+    "default_level": "ALL",
+    "auto_clear_threshold": 500,
+    "capture_network_errors": true,
+    "capture_javascript_errors": true
+  },
+  "screenshots": {
+    "default_path": "./screenshots",
+    "default_format": "png",
+    "quality": 90,
+    "max_width": 1920,
+    "max_height": 1080
+  },
+  "timeouts": {
+    "page_load": 30,
+    "element_wait": 10,
+    "script_execution": 10,
+    "screenshot": 5
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "browser_mcp.log",
+    "max_size": "10MB",
+    "backup_count": 20
+  },
+  "security": {
+    "allowed_domains": [],
+    "blocked_domains": [
+      "malware-site.com",
+      "phishing-site.com"
+    ],
+    "max_redirects": 5,
+    "verify_ssl": true
+  },
+  "performance": {
+    "max_concurrent_browsers": 3,
+    "memory_limit_mb": 1024,
+    "cpu_limit_percent": 80,
+    "cleanup_interval": 300
+  },
+  "features": {
+    "enable_extensions": false,
+    "enable_plugins": false,
+    "enable_images": true,
+    "enable_javascript": true,
+    "enable_css": true
+  }
+}
