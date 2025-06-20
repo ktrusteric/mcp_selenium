@@ -81,13 +81,18 @@ https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-w
 ### 4. Python 环境配置
 
 # 创建虚拟环境
+```
 python3 -m venv venv
 source venv/bin/activate
+```
 
 # 安装依赖
+```
 pip install -r requirements.txt
+```
 
 # 安装 FastMCP（如果不在 requirements.txt 中）
+```
 pip install fastmcp
 ```
 
