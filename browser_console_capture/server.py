@@ -14,10 +14,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import mcp.server.stdio
-import mcp.types as types
-from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.fastmcp import FastMCP
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -39,7 +36,10 @@ state = {
 }
 
 # MCP服务器实例
-mcp = Server("browser-console-capture")
+mcp = FastMCP(
+    name="browser-console-capture",
+    instructions="This is a browser console capture MCP service with test-token-eric authentication support.",
+)
 
 def browser_mcp_auth_required(func):
     """装饰器：要求浏览器MCP认证"""
@@ -217,7 +217,7 @@ def get_console_logs_internal(level: str = "ALL", limit: int = 1000, format_outp
         }
 
 @mcp.tool()
-def authenticate_user(username: str, password: str):
+def authenticate_user(username: str, password: str) -> dict:
     """
     Authenticate user for browser operations.
     :param username: Username
@@ -242,7 +242,7 @@ def authenticate_user(username: str, password: str):
 
 @mcp.tool()
 @browser_mcp_auth_required
-def open_browser(headless: bool = False, window_size: str = "1920,1080", **kwargs):
+def open_browser(headless: bool = False, window_size: str = "1920,1080", **kwargs) -> dict:
     """
     Open a new browser instance with enhanced configuration.
     :param headless: Whether to run in headless mode
@@ -276,7 +276,7 @@ def open_browser(headless: bool = False, window_size: str = "1920,1080", **kwarg
 
 @mcp.tool()
 @browser_mcp_auth_required
-def navigate_to_url(url: str, wait_for_load: bool = True, timeout: int = 30, **kwargs):
+def navigate_to_url(url: str, wait_for_load: bool = True, timeout: int = 30, **kwargs) -> dict:
     """
     Navigate to a specific URL with enhanced loading detection.
     :param url: Target URL
@@ -323,7 +323,7 @@ def navigate_to_url(url: str, wait_for_load: bool = True, timeout: int = 30, **k
 
 @mcp.tool()
 @browser_mcp_auth_required
-def execute_javascript(script: str, capture_console: bool = True, timeout: int = 30, return_value: bool = True, **kwargs):
+def execute_javascript(script: str, capture_console: bool = True, timeout: int = 30, return_value: bool = True, **kwargs) -> dict:
     """
     Execute JavaScript code in the current page with enhanced console capture.
     :param script: JavaScript code to execute
@@ -415,7 +415,7 @@ def execute_javascript(script: str, capture_console: bool = True, timeout: int =
         }
 
 @mcp.tool()
-def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: int = 1000, include_performance: bool = True):
+def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: int = 1000, include_performance: bool = True) -> dict:
     """
     Get console logs from the browser with enhanced formatting and analysis.
     Based on Chrome DevTools Console API standards.
@@ -520,7 +520,7 @@ def get_console_logs(level: str = "ALL", clear_after_get: bool = False, limit: i
         }
 
 @mcp.tool()
-def click_element(selector: str, by: str = "css", timeout: int = 10, wait_after_click: float = 1, capture_before_after: bool = False):
+def click_element(selector: str, by: str = "css", timeout: int = 10, wait_after_click: float = 1, capture_before_after: bool = False) -> dict:
     """
     Click an element on the current page with enhanced feedback.
     :param selector: Element selector
@@ -635,7 +635,7 @@ def click_element(selector: str, by: str = "css", timeout: int = 10, wait_after_
         }
 
 @mcp.tool()
-def input_text(selector: str, text: str, by: str = "css", clear_first: bool = True, timeout: int = 10, simulate_typing: bool = False):
+def input_text(selector: str, text: str, by: str = "css", clear_first: bool = True, timeout: int = 10, simulate_typing: bool = False) -> dict:
     """
     Input text into an element on the current page with enhanced features.
     :param selector: Element selector
@@ -730,7 +730,7 @@ def input_text(selector: str, text: str, by: str = "css", clear_first: bool = Tr
         }
 
 @mcp.tool()
-def take_screenshot(filename: str = None, full_page: bool = False, element_selector: str = None, include_metadata: bool = True):
+def take_screenshot(filename: str = None, full_page: bool = False, element_selector: str = None, include_metadata: bool = True) -> dict:
     """
     Take a screenshot of the current page with enhanced features.
     :param filename: Screenshot filename (auto-generated if not provided)
@@ -827,7 +827,7 @@ def take_screenshot(filename: str = None, full_page: bool = False, element_selec
         }
 
 @mcp.tool()
-def get_page_info(include_html: bool = False, include_cookies: bool = False, include_performance: bool = True, include_console_summary: bool = True):
+def get_page_info(include_html: bool = False, include_cookies: bool = False, include_performance: bool = True, include_console_summary: bool = True) -> dict:
     """
     Get comprehensive information about the current page.
     :param include_html: Whether to include page HTML
@@ -936,7 +936,7 @@ def get_page_info(include_html: bool = False, include_cookies: bool = False, inc
         }
 
 @mcp.tool()
-def close_browser():
+def close_browser() -> dict:
     """
     Close the browser instance with detailed reporting.
     """
@@ -975,20 +975,5 @@ def close_browser():
             "message": "Error during browser cleanup"
         }
 
-async def main():
-    # Run the server using stdin/stdout streams
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await mcp.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="browser-console-capture",
-                server_version="2.0.0",
-                capabilities=mcp.server.ServerCapabilities(
-                    tools={},
-                )
-            ),
-        )
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    mcp.run()
