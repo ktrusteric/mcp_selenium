@@ -8,12 +8,13 @@ from typing import Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
-# 默认用户信息 - 模拟eric用户
+# 默认用户信息 - 使用数据库中的真实eric用户
 DEFAULT_USER_DATA = {
-    'user_id': 'eric-browser-mcp-user',
-    'username': 'eric',
+    'user_id': '8e8cc625-8d74-40bc-bd8c-fc1ec30499a9',  # 数据库中eric用户的真实ID
+    'username': '凌亚峰',
+    'password': 'welcome1',
     'login_name': 'eric',
-    'user_role': 'admin',
+    'user_role': 'admin',  # 主要角色，用户还具有普通用户和专家角色
     'phone': '13800000000',
     'is_active': True,
     'is_locked': False
@@ -21,6 +22,34 @@ DEFAULT_USER_DATA = {
 
 # 特殊token标识
 TEST_TOKEN_ERIC = 'test-token-eric'
+
+def authenticate_user(username: str, password: str) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    用户名密码认证
+    
+    Args:
+        username: 用户名或登录名
+        password: 密码
+        
+    Returns:
+        tuple: (success, message, user_data)
+    """
+    try:
+        # 检查是否为默认eric用户
+        if (username in [DEFAULT_USER_DATA['username'], DEFAULT_USER_DATA['login_name']] and 
+            password == DEFAULT_USER_DATA['password']):
+            logger.info(f"用户 {username} 密码认证成功")
+            return True, "认证成功", DEFAULT_USER_DATA.copy()
+        
+        # 这里可以添加其他用户的认证逻辑
+        # 例如：从数据库查询用户信息并验证密码
+        
+        logger.warning(f"用户 {username} 认证失败：用户名或密码错误")
+        return False, "用户名或密码错误", None
+        
+    except Exception as e:
+        logger.error(f"用户认证异常: {str(e)}")
+        return False, f"认证失败: {str(e)}", None
 
 def verify_browser_mcp_token(token: str) -> Tuple[bool, str, Dict[str, Any]]:
     """
