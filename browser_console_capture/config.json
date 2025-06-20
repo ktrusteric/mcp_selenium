@@ -1,4 +1,10 @@
 {
+  "server": {
+    "host": "localhost",
+    "port": 8000,
+    "debug": false,
+    "reload": false
+  },
   "browser": {
     "default_type": "chrome",
     "default_headless": false,
