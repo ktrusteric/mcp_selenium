@@ -141,7 +141,12 @@ python3 -c "import fastmcp; print('FastMCP imported successfully')"
 ```
 
 ## 启动服务
+```fastmcp
+fastmcp run server.py:mcp
+```
 IntelligentPublicSentimentSystem/mcp_services/browser_console_capture$ fastmcp run server.py:mcp
+
+
 2025-06-20 03:02:09,006 - server_module - INFO - 日志系统初始化完成，配置已加载
 2025-06-20 03:02:09,010 - auth_utils - INFO - === 浏览器MCP认证配置 ===
 2025-06-20 03:02:09,010 - auth_utils - INFO - 默认用户: eric
